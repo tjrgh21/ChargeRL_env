@@ -1,0 +1,17 @@
+# --- 학습 결과물 제외 ---
+# sim_results, sim_results_1, sim_results_2 등을 모두 제외
+sim_results*
+
+# 학습 중 생성되는 그래프 이미지 제외
+*.png
+
+# --- 파이썬 환경 설정 제외 ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# --- 기타 시스템 파일 ---
+.DS_Store
+Thumbs.db

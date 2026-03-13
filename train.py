@@ -23,7 +23,7 @@ def moving_average(data, window=500):
 
 
 # --- 비교 정책군 정의 ---
-def run_fixed_policy(episodes=5000):
+def run_fixed_policy(episodes=3000):
     """Naive Fixed: 1시간만 대기 후 바로 충전"""
 
     env = BatteryEnv(); rewards, idles = [], []
@@ -43,7 +43,7 @@ def run_fixed_policy(episodes=5000):
 
 
 
-def run_random_policy(episodes=5000):
+def run_random_policy(episodes=3000):
     """[추가] Random Policy: 매 순간 무작위로 충전/대기 결정"""
     env = BatteryEnv(); rewards, idles = [], []
 
@@ -60,7 +60,7 @@ def run_random_policy(episodes=5000):
     return rewards, idles
 
 
-def run_greedy_policy(episodes=5000):
+def run_greedy_policy(episodes=3000):
     """Greedy Policy: 즉시 충전"""
     env = BatteryEnv(); rewards, idles = [], []
 
@@ -78,7 +78,7 @@ def run_greedy_policy(episodes=5000):
 
 
 
-def train_qlearning_full(env, agent, episodes=5000):
+def train_qlearning_full(env, agent, episodes=3000):
     """Q-Learning 학습 루프"""
     rewards, idles, success_history = [], [], []
 
@@ -115,7 +115,7 @@ def train_qlearning_full(env, agent, episodes=5000):
 
 if __name__ == "__main__":
 
-    EPISODES = 5000
+    EPISODES = 3000
 
     save_dir = get_next_save_dir()
     os.makedirs(save_dir, exist_ok=True)

@@ -55,50 +55,35 @@ class BatteryEnv:
 
         """action 0: 대기 (Wait), action 1: 충전 (Charge)"""
         # 1. 액션 수행 및 SoC 업데이트
-
         if action == 1:
-
             self.is_charging = True
             charge_rate = 1.4 if self.soc < 80 else 0.6
             self.soc = min(100.0, self.soc + charge_rate)
 
             # 처음 100%에 도달한 시점 기록
-
             if self.soc >= 100.0 and self.full_charge_time == 0:
                 self.full_charge_time = self.current_time
 
         else:
             self.is_charging = False
 
-
-
         # 2. 시간 흐름
-
         self.current_time += 1
         done = self.current_time >= self.actual_unplug_time
 
-       
-
         # 3. 보상 및 지표 계산
-
         reward = 0.0
         idle_time = 0
 
-       
-
         if not done:
-
-            # 매 스텝마다 주는 소량의 '배터리 보호 보상'
+            # # 매 스텝마다 주는 소량의 '배터리 보호 보상'
             if not self.is_charging and self.soc < 100:
                 reward = 0.05 # e대기 보상 유지
 
         else:
-
             # 최종 기기 해제 시점의 정산
             if self.full_charge_time > 0:
                 idle_time = self.actual_unplug_time - self.full_charge_time
-
-           
 
             # [수정] UX 중심의 공정한 보상 로직
             if self.soc >= 99.5: # 사실상 완충 성공
@@ -108,13 +93,22 @@ class BatteryEnv:
             else:
                 # 완충 실패 시 상황 분석
                 if self.potential_soc < 99.5:
-
                     # 물리적 한계 상황에서는 감점 최소화
                     reward = 50.0 - (self.potential_soc - self.soc) * 1.0
 
                 else:
-
                     # 에이전트 과실 시에만 음수 보상 부여
                     reward = -(100.0 - self.soc) * 1.0
+            # else:
+            #     # [핵심] 실패 시 '절벽' 패널티 대신 '경사' 패널티 적용
+            #     soc_gap = 100.0 - self.soc
+                
+            #     if self.potential_soc >= 99.5:
+            #         # 과실 시 패널티를 -100 고정이 아닌, 부족한 양만큼만 정직하게 줍니다.
+            #         # 기본 패널티를 없애거나 낮추어 '성장할 기회'를 줍니다.
+            #         reward = -(soc_gap * 1.0)
+            #     else:
+            #         # 물리적 한계는 벌을 주지 않고 0점에 가깝게 처리합니다.
+            #         reward = -(soc_gap * 0.2)
 
         return self._get_state(), reward, done, {"soc": self.soc, "idle_time": idle_time}

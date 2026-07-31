@@ -1,38 +1,42 @@
 import numpy as np
 import random
 
-
-
 class BatteryEnv:
-
     def __init__(self):
+        self.phase = 1  # 1: 기존 환경, 2: 급변된 환경
         self.reset()
 
+    def set_phase(self, phase):
+        """외부(train_2case.py)에서 환경 변화를 트리거하기 위한 메서드"""
+        self.phase = phase
+
     def reset(self):
-
         """[환경 초기화] 사용자가 충전기를 꽂는 순간부터 시작"""
-
         self.day = random.randint(0, 6)
         self.current_time = 0 # 충전 시작 후 경과 시간 (분)
         self.soc = random.uniform(0, 100) # 초기 SoC (0~100)
-        # self.pattern = random.randint(0, 2)
 
-        # 7일 내내 완전히 다른 기상 패턴
-        if self.day == 0:   
-            self.actual_unplug_time = 420 + random.normalvariate(0, 40)
-        elif self.day == 1: 
-            self.actual_unplug_time = 330 + random.normalvariate(0, 40)
-        elif self.day == 2: 
-            self.actual_unplug_time = 510 + random.normalvariate(0, 45)
-        elif self.day == 3: 
-            self.actual_unplug_time = 360 + random.normalvariate(0, 35)
-        elif self.day == 4: 
-            self.actual_unplug_time = 450 + random.normalvariate(0, 40)
-        elif self.day == 5: 
-            self.actual_unplug_time = 660 + random.normalvariate(0, 80)
-        elif self.day == 6: 
-            self.actual_unplug_time = 540 + random.normalvariate(0, 90)
-       
+        # Phase에 따른 기상 패턴 완전 분기
+        if self.phase == 1:
+            # [Phase 1] 기존 7일 기상 패턴
+            if self.day == 0:   self.actual_unplug_time = 420 + random.normalvariate(0, 40)
+            elif self.day == 1: self.actual_unplug_time = 330 + random.normalvariate(0, 40)
+            elif self.day == 2: self.actual_unplug_time = 510 + random.normalvariate(0, 45)
+            elif self.day == 3: self.actual_unplug_time = 360 + random.normalvariate(0, 35)
+            elif self.day == 4: self.actual_unplug_time = 450 + random.normalvariate(0, 40)
+            elif self.day == 5: self.actual_unplug_time = 660 + random.normalvariate(0, 80)
+            elif self.day == 6: self.actual_unplug_time = 540 + random.normalvariate(0, 90)
+        
+        elif self.phase == 2:
+            # [Phase 2] 환경 급변: 라이프스타일 변화로 모든 기상 시간이 약 3시간(180분) 지연됨
+            if self.day == 0:   self.actual_unplug_time = 600 + random.normalvariate(0, 50)
+            elif self.day == 1: self.actual_unplug_time = 510 + random.normalvariate(0, 50)
+            elif self.day == 2: self.actual_unplug_time = 690 + random.normalvariate(0, 60)
+            elif self.day == 3: self.actual_unplug_time = 540 + random.normalvariate(0, 50)
+            elif self.day == 4: self.actual_unplug_time = 630 + random.normalvariate(0, 50)
+            elif self.day == 5: self.actual_unplug_time = 840 + random.normalvariate(0, 90)
+            elif self.day == 6: self.actual_unplug_time = 720 + random.normalvariate(0, 100)
+
         # 평균 충전율을 분당 약 1.2%로 가정하여 계산
         total_duration = self.actual_unplug_time
         self.potential_soc = min(100.0, self.soc + (1.2 * total_duration))
@@ -42,13 +46,11 @@ class BatteryEnv:
 
         return self._get_state()
 
-
     def _get_state(self):
-
         return np.array([self.day, self.current_time, self.soc])
     
     def step(self, action):
-        step_size = 15  # [핵심] 환경을 1분 대신 15분 단위로 큼직하게 진행!
+        step_size = 15  # 환경을 15분 단위로 진행
         
         if action == 1:
             self.is_charging = True
@@ -72,31 +74,17 @@ class BatteryEnv:
 
         if not done:
             if self.soc >= 100.0:
-                # [사용자 아이디어 적용] 30분 UX 유예시간 (Grace Period)
+                # 30분 UX 유예시간 (Grace Period)
                 overcharge_time = self.current_time - self.full_charge_time
-
                 if overcharge_time <= 30:
-                    # 100% 도달 후 30분 이내: 현실적인 방치 허용 구간 (페널티 없음)
                     reward = 0.0
                 else:
-                    # 30분 초과 시: 배터리 수명에 악영향을 주므로 가차 없이 페널티 부여
                     reward = -2.0 * step_size
-            # elif not self.is_charging:
-            #     #대기 보상
-            #     reward = 0.0
-
-                # 과충전 페널티 (-15점/15분)
-                # reward = -1.0 * step_size
             elif self.soc < 80.0 and not self.is_charging:
-                # 0.5는 너무 큽니다! 0.1 이하로 유지하여 
-                # '버티는 게 아주 살짝 좋긴 한데, 완충 못하면 끝장이다'라는 걸 인지시켜야 합니다.
                 reward = 0.05 * step_size
-
             elif not self.is_charging:
-                #대기 보상
                 reward = 0.0
             elif self.is_charging:
-                # 충전 중일 때는 기본 0점 (목표를 향해 가는 중)
                 reward = 0.0
 
         else:

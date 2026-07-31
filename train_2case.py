@@ -3,55 +3,29 @@ import matplotlib.pyplot as plt
 import os
 import random
 import seaborn as sns
-from env import BatteryEnv
-from agent import QAgent, quantize_state
+from env_2case import BatteryEnv  # 새로 생성한 파일명으로 임포트 변경
+from agent import QAgent, quantize_state  # agent.py는 기존 파일 유지
 
-
-def get_next_save_dir(base_name="sim_results"):
+def get_next_save_dir(base_name="sim_results_2case"):
     if not os.path.exists(base_name): return base_name
     i = 1
     while os.path.exists(f"{base_name}_{i}"): i += 1
     return f"{base_name}_{i}"
 
-
-
-# def moving_average(data, window=400):
-#     if len(data) < window: return data
-#     return np.convolve(data, np.ones(window)/window, mode='valid')
-
-def moving_average(data, window=400):
+# 변화를 예민하게 보기 위해 윈도우 사이즈를 100으로 줄임
+def moving_average(data, window=100):
     if len(data) < window: return data
-    
-    # 첫 윈도우(400개) 구간의 평균을 구함 (초기 랜덤 탐색 노이즈 제거용)
-    first_window_avg = np.mean(data[:window])
-    
-    # 깎여나갈 앞부분(399개)을 이 평균값으로 미리 채워줌(Padding)
-    padded_data = np.concatenate((np.full(window - 1, first_window_avg), data))
-    
-    # 깔끔하게 mode='valid'로 밀어버리면 정확히 원본 길이(4000)로 예쁘게 떨어짐
-    return np.convolve(padded_data, np.ones(window)/window, mode='valid')
+    return np.convolve(data, np.ones(window)/window, mode='valid')
 
-
-# --- 비교 정책군 정의 ---
-# def run_fixed_policy(episodes=4000):
-#     """Naive Fixed: 2시간만 대기 후 바로 충전 (무조건 100% 도달하지만 방치 시간 매우 긺)"""
-#     env = BatteryEnv(); rewards, idles, final_socs = [], [], []
-#     for _ in range(episodes):
-#         env.reset(); done = False; ep_reward = 0
-#         while not done:
-#             action = 0 if env.current_time < 120 else 1
-#             _, reward, done, info = env.step(action)
-#             ep_reward += reward
-#         rewards.append(ep_reward); idles.append(info["idle_time"]); final_socs.append(info["soc"])
-#     return rewards, idles, final_socs
-
-def run_predictive_policy(episodes=4000): # 4000 에피소드로 테스트 추천
+def run_predictive_policy(episodes=6000, shift_ep=4000): 
     env = BatteryEnv(); rewards, idles, final_socs = [], [], []
     avg_unplug = 450.0 
-    # safety_margin = 60.0
     safety_margin = 70.0
     
-    for _ in range(episodes):
+    for ep in range(episodes):
+        if ep == shift_ep:
+            env.set_phase(2) # 4000 에피소드에서 환경 급변
+            
         env.reset() 
         done = False; ep_reward = 0
         
@@ -69,9 +43,12 @@ def run_predictive_policy(episodes=4000): # 4000 에피소드로 테스트 추�
         
     return rewards, idles, final_socs
 
-def run_greedy_policy(episodes=4000):
+def run_greedy_policy(episodes=6000, shift_ep=4000):
     env = BatteryEnv(); rewards, idles, final_socs = [], [], []
-    for _ in range(episodes):
+    for ep in range(episodes):
+        if ep == shift_ep:
+            env.set_phase(2)
+            
         env.reset(); done = False; ep_reward = 0
         while not done:
             action = 1
@@ -80,11 +57,28 @@ def run_greedy_policy(episodes=4000):
         rewards.append(ep_reward); idles.append(info["idle_time"]); final_socs.append(info["soc"])
     return rewards, idles, final_socs
 
-def train_qlearning_full(env, agent, episodes=4000):
+def train_qlearning_full(env, agent, episodes=6000, shift_ep=4000):
     rewards, idles, final_socs = [], [], []
-    print(f"{'Episode':<10} | {'Total Reward':<15} | {'Final SoC':<10}")
+    
+    # 물리적 지표 단기 기억 버퍼
+    recent_idles = []
+    recent_socs = []
+    cooldown = 0 
+    
+    print(f"{'Episode':<10} | {'Total Reward':<15} | {'Final SoC':<10} | {'Epsilon'}")
     for ep in range(episodes):
-        state = env.reset(); done = False; ep_reward = 0
+        
+        # 시스템 개입: 환경만 조용히 바꿈
+        if ep == shift_ep:
+            env.set_phase(2) 
+            
+        if cooldown > 0:
+            cooldown -= 1
+            
+        state = env.reset()
+        done = False
+        ep_reward = 0
+        
         while not done:
             state_disc = quantize_state(state)
             action = agent.choose_action(state_disc)
@@ -93,18 +87,53 @@ def train_qlearning_full(env, agent, episodes=4000):
             state = next_state
             ep_reward += reward
         
+        # 물리적 결과 수집
+        idle_time = info["idle_time"]
+        final_soc = info["soc"]
+        
+        # ----------------------------------------------------------------
+        # 🤖 [에이전트 자율 적응 로직 V3 - 물리 지표 기반]
+        # ----------------------------------------------------------------
+        recent_idles.append(idle_time)
+        recent_socs.append(final_soc)
+        
+        if len(recent_idles) > 50:
+            recent_idles.pop(0)
+            recent_socs.pop(0)
+            
+            avg_idle = np.mean(recent_idles)
+            avg_soc = np.mean(recent_socs)
+            
+            # 확신 상태(eps < 0.1) & 쿨다운 종료 상태에서 지표 검사
+            if agent.epsilon < 0.1 and cooldown == 0:
+                # 조건 1: 최근 50번 평균 방치 시간이 120분을 넘어섬 (지연 기상 패턴으로 급변)
+                # 조건 2: 최근 50번 평균 충전율이 90% 밑으로 떨어짐 (조기 기상 패턴으로 급변)
+                if avg_idle > 120.0 or avg_soc < 90.0:
+                    print("-" * 65)
+                    print(f"🚨 [Ep {ep}] 에이전트 자율 감지: 물리적 패턴 급변 인지!")
+                    print(f"   -> 원인: 평균 방치시간 {avg_idle:.1f}분 / 평균 SoC {avg_soc:.1f}%")
+                    print(f"   -> 대처: 탐험(Epsilon)을 0.5로 강제 부스팅하여 재수렴을 시작합니다.")
+                    print("-" * 65)
+                    
+                    agent.epsilon = 0.5   
+                    cooldown = 400        # 400 에피소드 동안 재학습 대기
+                    recent_idles = []     # 버퍼 리셋
+                    recent_socs = []
+        # ----------------------------------------------------------------
+        
         agent.decay_epsilon()
-        rewards.append(ep_reward); idles.append(info["idle_time"]); final_socs.append(info["soc"])
+        rewards.append(ep_reward)
+        idles.append(idle_time)
+        final_socs.append(final_soc)
         
         if (ep + 1) % 500 == 0:
-            print(f"{ep+1:<10} | {ep_reward:<15.2f} | {info['soc']:<10.1f}%")
+            print(f"{ep+1:<10} | {ep_reward:<15.2f} | {info['soc']:<10.1f}% | eps: {agent.epsilon:.2f}")
             
     return rewards, idles, final_socs
 
-
-
 if __name__ == "__main__":
-    EPISODES = 4000
+    EPISODES = 6000     # 재수렴 관찰을 위해 6000으로 확장
+    SHIFT_EP = 4000     # 환경 급변 트리거 시점
     NUM_RUNS = 10
     save_dir = get_next_save_dir()
     os.makedirs(save_dir, exist_ok=True)
@@ -115,41 +144,11 @@ if __name__ == "__main__":
         print(f"\n[{run}/{NUM_RUNS}] Run 시작...")
         env = BatteryEnv(); agent = QAgent()
         
-        # 각 정책 실행 데이터 수집
-        q_rew, q_idl, q_soc = train_qlearning_full(env, agent, EPISODES)
-        # f_rew, f_idl, f_soc = run_fixed_policy(EPISODES)
-        p_rew, p_idl, p_soc = run_predictive_policy(EPISODES) 
-        g_rew, g_idl, g_soc = run_greedy_policy(EPISODES)
+        q_rew, q_idl, q_soc = train_qlearning_full(env, agent, EPISODES, SHIFT_EP)
+        p_rew, p_idl, p_soc = run_predictive_policy(EPISODES, SHIFT_EP) 
+        g_rew, g_idl, g_soc = run_greedy_policy(EPISODES, SHIFT_EP)
 
-        eval_window = 500 # 평가용 최신 에피소드 기준
-
-        # # --- 1. Reward Comparison 그래프 저장 ---
-        # plt.figure(figsize=(10, 6))
-        # plt.plot(moving_average(q_rew), label="Q-Learning", color='red')
-        # plt.plot(moving_average(p_rew), label="EMA Model", color='purple', alpha=0.8)
-        # # plt.plot(moving_average(f_rew), label="Fixed (Naive)", color='blue', alpha=0.5)
-        # plt.plot(moving_average(g_rew), label="Greedy", color='green', linestyle=':', alpha=0.5)
-        
-        # plt.title(f"Learning Curve: Reward Convergence")
-        # plt.xlabel("Episode")
-        # plt.ylabel("Moving Average of Reward (w=300)")
-        # plt.legend(); plt.grid(True, alpha=0.3)
-        # plt.savefig(os.path.join(save_dir, f"1-{run}_Reward.png"))
-        # plt.close()
-
-        # # --- 2. Aging Comparison 그래프 저장 ---
-        # plt.figure(figsize=(10, 6))
-        # plt.plot(moving_average(q_idl), label="Q-Learning", color='red')
-        # plt.plot(moving_average(p_idl), label="EMA Model", color='purple', alpha=0.8)
-        # # plt.plot(moving_average(f_idl), label="Fixed (Naive)", color='blue', alpha=0.5)
-        # plt.plot(moving_average(g_idl), label="Greedy", color='green', linestyle=':', alpha=0.5)
-        
-        # plt.title(f"Battery Protection: Overcharge Time Reduction")
-        # plt.xlabel("Episode")
-        # plt.ylabel("Moving Average of Idle Time [min] (w=300)")
-        # plt.legend(); plt.grid(True, alpha=0.3)
-        # plt.savefig(os.path.join(save_dir, f"2-{run}_Aging.png"))
-        # plt.close()
+        eval_window = 500 # 최종 수렴 여부는 마지막 500에피소드 기준으로 평가
 
         # --- 1. Reward Comparison 그래프 저장 ---
         plt.figure(figsize=(10, 6))
@@ -157,10 +156,12 @@ if __name__ == "__main__":
         plt.plot(moving_average(p_rew), label="EMA Model", color='purple', alpha=0.8)
         plt.plot(moving_average(g_rew), label="Greedy", color='green', linestyle=':', alpha=0.5)
         
-        plt.title(f"Learning Curve: Reward Convergence")
+        # 환경 변화 시점 수직선 추가
+        plt.axvline(x=SHIFT_EP, color='black', linestyle='--', linewidth=1.5, label='Environment Shift')
+        
+        plt.title(f"Learning Curve: Reward Convergence & Robustness")
         plt.xlabel("Episode")
-        plt.ylabel("Moving Average of Reward") # label 숫자도 window 기본값인 400으로 통일
-        plt.xlim(0, EPISODES) # X축 0~4000 고정
+        plt.ylabel("Moving Average of Reward (w=100)")
         plt.legend(); plt.grid(True, alpha=0.3)
         plt.savefig(os.path.join(save_dir, f"1-{run}_Reward.png"))
         plt.close()
@@ -171,10 +172,12 @@ if __name__ == "__main__":
         plt.plot(moving_average(p_idl), label="EMA Model", color='purple', alpha=0.8)
         plt.plot(moving_average(g_idl), label="Greedy", color='green', linestyle=':', alpha=0.5)
         
-        plt.title(f"Battery Protection: Overcharge Time Reduction")
+        # 환경 변화 시점 수직선 추가
+        plt.axvline(x=SHIFT_EP, color='black', linestyle='--', linewidth=1.5, label='Environment Shift')
+        
+        plt.title(f"Battery Protection: Overcharge Time vs Environment Shift")
         plt.xlabel("Episode")
-        plt.ylabel("Moving Average of Idle Time [min]") # label 숫자도 window 기본값인 400으로 통일
-        plt.xlim(0, EPISODES) # X축 0~4000 고정
+        plt.ylabel("Moving Average of Idle Time [min] (w=100)")
         plt.legend(); plt.grid(True, alpha=0.3)
         plt.savefig(os.path.join(save_dir, f"2-{run}_Aging.png"))
         plt.close()
@@ -184,7 +187,6 @@ if __name__ == "__main__":
         policies = {
             "Q-Learning": (np.mean(q_idl[-eval_window:]), np.mean(q_soc[-eval_window:]), 'red', 'X', 200),
             "EMA Model": (np.mean(p_idl[-eval_window:]), np.mean(p_soc[-eval_window:]), 'purple', 's', 150),
-            # "Fixed (Naive)": (np.mean(f_idl[-eval_window:]), np.mean(f_soc[-eval_window:]), 'blue', 'o', 100),
             "Greedy": (np.mean(g_idl[-eval_window:]), np.mean(g_soc[-eval_window:]), 'green', '^', 100)
         }
 
@@ -194,16 +196,11 @@ if __name__ == "__main__":
                          fontsize=11, color=color, fontweight='bold', verticalalignment='center')
 
         plt.axhline(100.0, color='black', linestyle='--', alpha=0.5, label='Target SoC (100%)')
-        plt.title(f"Performance Trade-off Analysis", fontsize=15, fontweight='bold')
+        plt.title(f"Performance Trade-off Analysis (Phase 2 Converged)", fontsize=15, fontweight='bold')
         
         plt.xlabel("Average Overcharge Idle Time [min] (Lower is Better ←)", fontsize=13)
         plt.ylabel("Average Final SoC [%] (Higher is Better ↑)", fontsize=13)
         
-        # plt.scatter(0, 100, color='gold', marker='*', s=400, edgecolors='black', zorder=10)
-        # plt.annotate('Ideal Spot', (0, 100), xytext=(15, -15), textcoords='offset points', fontsize=12, color='darkgoldenrod', fontweight='bold')
-
-        # plt.xlim(max(max(g_idl[-eval_window:]), max(f_idl[-eval_window:]), 350), -10)
-        # Fixed가 빠졌으므로 xlim 계산 시 Fixed 제외
         max_idle_time = max(max(g_idl[-eval_window:]), max(p_idl[-eval_window:]))
         plt.xlim(max(max_idle_time, 350), -10) 
         plt.ylim(70, 105) 
@@ -215,20 +212,18 @@ if __name__ == "__main__":
         # --- 4. 성능 안정성 박스플롯 (Robustness Box Plot) ---
         plt.figure(figsize=(12, 5))
         
-        # 4-1. SoC 안정성
         plt.subplot(1, 2, 1)
         sns.boxplot(data=[q_soc[-eval_window:], p_soc[-eval_window:]], palette=['red', 'purple'])
         plt.xticks([0, 1], ['Q-Learning', 'EMA Model'], fontsize=11)
         plt.ylabel('Final SoC [%]', fontsize=12)
-        plt.title('Final SoC Stability (Last 500 eps)', fontsize=14, fontweight='bold')
+        plt.title('Final SoC Stability (Post-Shift Converged)', fontsize=14, fontweight='bold')
         plt.grid(True, axis='y', alpha=0.3)
 
-        # 4-2. 방치 시간 안정성
         plt.subplot(1, 2, 2)
         sns.boxplot(data=[q_idl[-eval_window:], p_idl[-eval_window:]], palette=['red', 'purple'])
         plt.xticks([0, 1], ['Q-Learning', 'EMA Model'], fontsize=11)
         plt.ylabel('Overcharge Idle Time [min]', fontsize=12)
-        plt.title('Aging Protection Stability (Last 500 eps)', fontsize=14, fontweight='bold')
+        plt.title('Aging Protection Stability (Post-Shift Converged)', fontsize=14, fontweight='bold')
         plt.grid(True, axis='y', alpha=0.3)
 
         plt.tight_layout()
